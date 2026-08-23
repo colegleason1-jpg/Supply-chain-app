@@ -16,8 +16,23 @@ st.markdown("---")
 # --- SIDEBAR: COMMERCIAL CONFIGURATION & CONTROLS ---
 st.sidebar.header("Executive Control Panel")
 
-total_budget = st.sidebar.slider(
-    "Total Budget Cap ($)", 100000, 1500000, 750000, step=25000
+# Expanded, flexible baseline risk input
+baseline_risk = st.sidebar.number_input(
+    "Starting Baseline System Risk (%)",
+    min_value=0.0,
+    max_value=100.0,
+    value=82.5,
+    step=1.0,
+)
+
+# Expanded budget controls: Min $10k, Max $20M
+total_budget = st.sidebar.number_input(
+    "Total Budget Cap ($)",
+    min_value=10000,
+    max_value=20000000,
+    value=750000,
+    step=25000,
+    format="%d",
 )
 
 st.sidebar.markdown("---")
@@ -162,7 +177,6 @@ total_risk_drop = sum(risks[n] for n in selected_nodes)
 total_lead_time_saved = sum(lead_times[n] for n in selected_nodes)
 total_carbon_saved = sum(carbon_impacts[n] for n in selected_nodes)
 
-baseline_risk = 82.5
 optimized_risk = max(0.0, baseline_risk - total_risk_drop)
 
 # --- DASHBOARD METRICS DISPLAY ---
@@ -225,9 +239,11 @@ with tab2:
   st.markdown("Evaluating portfolio scaling across variable capital caps:")
 
   sweep_results = []
-  budget_range = range(
-      max(100000, total_budget - 200000), total_budget + 250000, 50000
-  )
+  # Dynamically scale sensitivity sweep range based on user's selected budget
+  step_size = max(10000, int(total_budget * 0.1))
+  lower_bound = max(10000, total_budget - (step_size * 4))
+  upper_bound = total_budget + (step_size * 4)
+  budget_range = range(lower_bound, upper_bound, step_size)
 
   for b in budget_range:
     sub_prob = pl.LpProblem(f"Sub_{b}", pl.LpMaximize)

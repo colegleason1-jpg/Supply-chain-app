@@ -9,31 +9,96 @@ st.set_page_config(
 st.title("Supply Chain Resilience & Capital Allocation Engine")
 st.markdown(
     "*Commercial Enterprise Edition: Multi-Objective Optimization, Dynamic"
-    " Bundles & Custom Variables.*"
+    " Bundles, Risk Assessment Wizard & Custom Variables.*"
 )
 st.markdown("---")
 
 # --- SIDEBAR: COMMERCIAL CONFIGURATION & CONTROLS ---
 st.sidebar.header("Executive Control Panel")
 
-# Expanded, flexible baseline risk input
-baseline_risk = st.sidebar.number_input(
-    "Starting Baseline System Risk (%)",
-    min_value=0.0,
-    max_value=100.0,
-    value=82.5,
-    step=1.0,
+# ===== BASELINE RISK ASSESSMENT WIZARD =====
+st.sidebar.markdown("---")
+st.sidebar.subheader("📊 Baseline Risk Assessment Wizard")
+st.sidebar.markdown(
+    "Define your supply chain risk components, assign impact values"
+    " (0-100%), and weights. Baseline risk is calculated dynamically."
 )
 
-# Expanded budget controls: Min $10k, Max $20M
-total_budget = st.sidebar.number_input(
-    "Total Budget Cap ($)",
-    min_value=10000,
-    max_value=20000000,
-    value=750000,
-    step=25000,
-    format="%d",
+# Initialize risk components if not present
+if "risk_components_df" not in st.session_state:
+  st.session_state.risk_components_df = pd.DataFrame([
+      {"Risk Category": "Manufacturing", "Risk Value (%)": 30.0, "Weight (%)": 25.0},
+      {"Risk Category": "Shipping", "Risk Value (%)": 35.0, "Weight (%)": 30.0},
+      {"Risk Category": "Supplier", "Risk Value (%)": 25.0, "Weight (%)": 25.0},
+      {"Risk Category": "Demand", "Risk Value (%)": 20.0, "Weight (%)": 20.0},
+  ])
+
+# Allow editing of risk components
+edited_risk_components = st.sidebar.data_editor(
+    st.session_state.risk_components_df,
+    num_rows="dynamic",
+    use_container_width=True,
+    key="risk_editor",
 )
+st.session_state.risk_components_df = edited_risk_components
+
+# Calculate baseline risk from components
+try:
+  risk_df_clean = edited_risk_components.dropna(
+      subset=["Risk Category", "Risk Value (%)", "Weight (%)"]
+  )
+  if not risk_df_clean.empty:
+    # Normalize weights to sum to 100%
+    total_weight = risk_df_clean["Weight (%)"].sum()
+    if total_weight > 0:
+      normalized_weights = risk_df_clean["Weight (%)"] / total_weight
+    else:
+      normalized_weights = pd.Series([1.0 / len(risk_df_clean)] * len(risk_df_clean))
+    
+    # Baseline risk = weighted average of risk components
+    baseline_risk = (
+        risk_df_clean["Risk Value (%)"] * normalized_weights
+    ).sum()
+  else:
+    baseline_risk = 0.0
+except Exception:
+  baseline_risk = 0.0
+
+st.sidebar.metric("📈 Calculated Baseline Risk", f"{baseline_risk:.2f}%")
+
+# Target Goal Mode Controls
+st.sidebar.markdown("---")
+enable_target_mode = st.sidebar.checkbox(
+    "🎯 Enable Target Risk Goal Mode",
+    value=False,
+    help=(
+        "Finds the minimum budget and optimal nodes needed to hit a specific"
+        " target risk."
+    ),
+)
+
+if enable_target_mode:
+  target_risk_goal = st.sidebar.number_input(
+      "Target System Risk Goal (%)",
+      min_value=0.0,
+      max_value=100.0,
+      value=20.0,
+      step=1.0,
+  )
+  total_budget = 20000000  # Expand budget limit automatically to find the solution
+  st.sidebar.info(
+      f"Target Mode Active: Solving for minimum capital required to reach"
+      f" <= {target_risk_goal}% risk."
+  )
+else:
+  total_budget = st.sidebar.number_input(
+      "Total Budget Cap ($)",
+      min_value=10000,
+      max_value=20000000,
+      value=750000,
+      step=25000,
+      format="%d",
+  )
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("1. Custom Intervention Nodes")
@@ -121,43 +186,87 @@ carbon_impacts = dict(zip(nodes, edited_nodes["Carbon Impact (Tons)"]))
 actions = dict(zip(nodes, edited_nodes["Action"]))
 
 # --- OPTIMIZATION ENGINE (ADVANCED ILP SOLVER) ---
-prob = pl.LpProblem("Commercial_Supply_Chain_Optimization", pl.LpMaximize)
-x = {n: pl.LpVariable(f"x_{n}", cat="Binary") for n in nodes}
+if enable_target_mode:
+  # Goal-seeking mode: Minimize cost while ensuring risk reduction meets the target goal
+  prob = pl.LpProblem("Target_Goal_Optimization", pl.LpMinimize)
+  x = {n: pl.LpVariable(f"x_{n}", cat="Binary") for n in nodes}
 
-bundle_vars = {}
-for idx, row in edited_bundles.iterrows():
-  b_name = row.get("Bundle Name")
-  if not b_name or pd.isna(b_name) or str(b_name).strip().lower() == "none":
-    continue
+  bundle_vars = {}
+  for idx, row in edited_bundles.iterrows():
+    b_name = row.get("Bundle Name")
+    if not b_name or pd.isna(b_name) or str(b_name).strip().lower() == "none":
+      continue
+    try:
+      b_discount = float(row.get("Discount ($)", 0))
+    except (ValueError, TypeError):
+      b_discount = 0.0
 
-  try:
-    b_discount = float(row.get("Discount ($)", 0))
-  except (ValueError, TypeError):
-    b_discount = 0.0
+    req_nodes_raw = str(row.get("Required Nodes (Comma Separated)", ""))
+    req_nodes = [
+        n.strip() for n in req_nodes_raw.split(",") if n.strip() in nodes
+    ]
 
-  req_nodes_raw = str(row.get("Required Nodes (Comma Separated)", ""))
-  req_nodes = [n.strip() for n in req_nodes_raw.split(",") if n.strip() in nodes]
+    if str(b_name).strip() and req_nodes:
+      b_var = pl.LpVariable(f"bundle_{idx}", cat="Binary")
+      bundle_vars[str(b_name).strip()] = {
+          "var": b_var,
+          "discount": b_discount,
+          "nodes": req_nodes,
+      }
+      for rn in req_nodes:
+        prob += b_var <= x[rn]
 
-  if str(b_name).strip() and req_nodes:
-    b_var = pl.LpVariable(f"bundle_{idx}", cat="Binary")
-    bundle_vars[str(b_name).strip()] = {
-        "var": b_var,
-        "discount": b_discount,
-        "nodes": req_nodes,
-    }
-    for rn in req_nodes:
-      prob += b_var <= x[rn]
+  # Objective: Minimize total cost spent minus bundle discounts
+  total_discounts = pl.lpSum(
+      bundle_vars[b]["var"] * bundle_vars[b]["discount"] for b in bundle_vars
+  )
+  prob += pl.lpSum(costs[n] * x[n] for n in nodes) - total_discounts
 
-# Objective: Maximize total risk reduction weighted with lead-time efficiency
-prob += pl.lpSum(
-    risks[n] * x[n] + (0.5 * lead_times[n] * x[n]) for n in nodes
-)
+  # Constraint: Achieved risk reduction must meet or exceed the required risk drop
+  required_risk_drop = max(0.0, baseline_risk - target_risk_goal)
+  prob += (
+      pl.lpSum(risks[n] * x[n] for n in nodes) >= required_risk_drop
+  )
 
-# Cost Constraint incorporating safe bundle discounts
-total_discounts = pl.lpSum(
-    bundle_vars[b]["var"] * bundle_vars[b]["discount"] for b in bundle_vars
-)
-prob += pl.lpSum(costs[n] * x[n] for n in nodes) - total_discounts <= total_budget
+else:
+  # Standard mode: Maximize risk reduction under budget cap
+  prob = pl.LpProblem("Commercial_Supply_Chain_Optimization", pl.LpMaximize)
+  x = {n: pl.LpVariable(f"x_{n}", cat="Binary") for n in nodes}
+
+  bundle_vars = {}
+  for idx, row in edited_bundles.iterrows():
+    b_name = row.get("Bundle Name")
+    if not b_name or pd.isna(b_name) or str(b_name).strip().lower() == "none":
+      continue
+    try:
+      b_discount = float(row.get("Discount ($)", 0))
+    except (ValueError, TypeError):
+      b_discount = 0.0
+
+    req_nodes_raw = str(row.get("Required Nodes (Comma Separated)", ""))
+    req_nodes = [
+        n.strip() for n in req_nodes_raw.split(",") if n.strip() in nodes
+    ]
+
+    if str(b_name).strip() and req_nodes:
+      b_var = pl.LpVariable(f"bundle_{idx}", cat="Binary")
+      bundle_vars[str(b_name).strip()] = {
+          "var": b_var,
+          "discount": b_discount,
+          "nodes": req_nodes,
+      }
+      for rn in req_nodes:
+        prob += b_var <= x[rn]
+
+  prob += pl.lpSum(
+      risks[n] * x[n] + (0.5 * lead_times[n] * x[n]) for n in nodes
+  )
+  total_discounts = pl.lpSum(
+      bundle_vars[b]["var"] * bundle_vars[b]["discount"] for b in bundle_vars
+  )
+  prob += (
+      pl.lpSum(costs[n] * x[n] for n in nodes) - total_discounts <= total_budget
+  )
 
 prob.solve(pl.PULP_CBC_CMD(msg=False))
 
@@ -195,17 +304,82 @@ sec1, sec2 = st.columns(2)
 sec1.metric("ESG Carbon Offset", f"{total_carbon_saved} Metric Tons")
 sec2.metric("Active Synergy Bundles", f"{len(active_bundle_names)} Applied")
 
+if enable_target_mode:
+  if optimized_risk <= target_risk_goal:
+    st.success(
+        f"🎯 Target Goal Achieved! Minimum budget required to reach"
+        f" {target_risk_goal}% risk is ${final_cost_spent:,.2f}."
+    )
+  else:
+    st.warning(
+        "⚠️ Target Goal Unreachable with current nodes. Add more risk-reduction"
+        " nodes or lower your target."
+    )
+
 if active_bundle_names:
   st.success(
       "Active Commercial Bundles Applied: " + ", ".join(active_bundle_names)
   )
 
 st.markdown("---")
-tab1, tab2 = st.tabs(
-    ["Optimal Portfolio", "CFO Budget Sensitivity & Visual Sweep"]
+tab1, tab2, tab3 = st.tabs(
+    [
+        "Risk Assessment Breakdown",
+        "Optimal Portfolio",
+        "CFO Budget Sensitivity & Visual Sweep",
+    ]
 )
 
 with tab1:
+  st.subheader("Risk Assessment Component Breakdown")
+  st.markdown(
+      "View how your baseline risk is calculated from individual"
+      " risk components:"
+  )
+
+  try:
+    risk_df_display = edited_risk_components.dropna(
+        subset=["Risk Category", "Risk Value (%)", "Weight (%)"]
+    )
+    if not risk_df_display.empty:
+      # Calculate normalized weights and contribution
+      total_weight = risk_df_display["Weight (%)"].sum()
+      if total_weight > 0:
+        risk_df_display = risk_df_display.copy()
+        risk_df_display["Normalized Weight (%)"] = (
+            risk_df_display["Weight (%)"] / total_weight * 100
+        )
+      else:
+        risk_df_display = risk_df_display.copy()
+        risk_df_display["Normalized Weight (%)"] = 100 / len(risk_df_display)
+
+      risk_df_display["Contribution to Baseline (%)"] = (
+          risk_df_display["Risk Value (%)"]
+          * risk_df_display["Normalized Weight (%)"]
+          / 100
+      )
+
+      st.dataframe(
+          risk_df_display[[
+              "Risk Category",
+              "Risk Value (%)",
+              "Weight (%)",
+              "Normalized Weight (%)",
+              "Contribution to Baseline (%)",
+          ]],
+          use_container_width=True,
+      )
+
+      st.info(
+          f"**Baseline Risk Formula:** Σ(Risk Value × Normalized Weight) ="
+          f" {baseline_risk:.2f}%"
+      )
+    else:
+      st.warning("No risk components defined. Add risk categories in the sidebar.")
+  except Exception as e:
+    st.error(f"Error calculating risk breakdown: {e}")
+
+with tab2:
   st.subheader("Globally Optimal Capital Allocation Portfolio")
   if selected_nodes:
     portfolio_data = []
@@ -234,15 +408,15 @@ with tab1:
         "No nodes selected. Increase your budget cap or adjust node costs."
     )
 
-with tab2:
+with tab3:
   st.subheader("Enterprise Budget Sensitivity Analysis")
   st.markdown("Evaluating portfolio scaling across variable capital caps:")
 
   sweep_results = []
-  # Dynamically scale sensitivity sweep range based on user's selected budget
-  step_size = max(10000, int(total_budget * 0.1))
-  lower_bound = max(10000, total_budget - (step_size * 4))
-  upper_bound = total_budget + (step_size * 4)
+  reference_budget = final_cost_spent if enable_target_mode else total_budget
+  step_size = max(10000, int(reference_budget * 0.1))
+  lower_bound = max(10000, reference_budget - (step_size * 4))
+  upper_bound = reference_budget + (step_size * 4)
   budget_range = range(lower_bound, upper_bound, step_size)
 
   for b in budget_range:

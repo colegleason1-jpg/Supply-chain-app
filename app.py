@@ -8,7 +8,8 @@ st.set_page_config(
 
 st.title("Supply Chain Resilience & Capital Allocation Engine")
 st.markdown(
-    "*Enterprise Edition: Dynamic Operations Research ILP Solver with Custom Variables & Sensitivity Analysis.*"
+    "*Enterprise Edition: Dynamic Operations Research ILP Solver with Custom"
+    " Variables & Sensitivity Analysis.*"
 )
 st.markdown("---")
 
@@ -112,13 +113,13 @@ col2.metric(
     "Optimized System Risk",
     f"{optimized_risk:.2f}%",
     delta=f"-{total_risk_drop:.2f} pts",
-    delta_value="inverse",
+    delta_color="inverse",
 )
 col3.metric(
     "Capital Deployed",
     f"${total_cost:,.2f}",
     delta=f"Cap: ${total_budget:,.2f}",
-    delta_value="off",
+    delta_color="off",
 )
 
 if is_bundle_active:

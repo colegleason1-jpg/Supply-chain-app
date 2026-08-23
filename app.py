@@ -1,85 +1,227 @@
+import pandas as pd
+import pulp as pl
 import streamlit as st
-import pulp
 
-st.set_page_config(page_title="Supply Chain Risk & Capital Allocator", layout="wide")
+st.set_page_config(
+    page_title="Supply Chain Resilience Engine", page_icon="⚙️", layout="wide"
+)
 
 st.title("Supply Chain Resilience & Capital Allocation Engine")
-st.markdown("*Enterprise Edition: Operations Research ILP Solver with Budget Sensitivity Sweep.*")
+st.markdown(
+    "*Enterprise Edition: Dynamic Operations Research ILP Solver with Custom Variables & Sensitivity Analysis.*"
+)
 st.markdown("---")
 
+# --- SIDEBAR: DYNAMIC CONFIGURATION & CONTROLS ---
 st.sidebar.header("Executive Control Panel")
-budget_cap = st.sidebar.slider("Total Budget Cap ($)", min_value=350000, max_value=600000, value=500000, step=25000)
-macro_shock = st.sidebar.slider("Manufacturing Disruption Risk (%)", min_value=10, max_value=90, value=60, step=5)
-shipping_shock = st.sidebar.slider("Shipping / Port Congestion Risk (%)", min_value=10, max_value=90, value=45, step=5)
-enable_synergy = st.sidebar.checkbox("Enable Multi-Node Synergy Bundle ($50k Discount)", value=True)
 
-def solve_ilp(cap, synergy_active):
-    nodes = {
-        'Logistics_Hub': {'cost': 200000, 'risk_drop': 20.0, 'desc': 'Alternative port routing & freight contracts'},
-        'Primary_Warehouse': {'cost': 250000, 'risk_drop': 22.0, 'desc': 'Primary warehouse resilience hardening'},
-        'Backup_Supplier': {'cost': 150000, 'risk_drop': 15.0, 'desc': 'Upgrade backup logistics & capacity'},
-        'Tier_1_Suppliers': {'cost': 300000, 'risk_drop': 24.0, 'desc': 'Dual-sourcing redundant Tier-1 parts'}
-    }
-    prob = pulp.LpProblem("Supply_Chain_Capital_Allocation", pulp.LpMaximize)
-    x = {node: pulp.LpVariable(f"x_{node}", cat='Binary') for node in nodes}
-    prob += pulp.lpSum(nodes[node]['risk_drop'] * x[node] for node in nodes)
+total_budget = st.sidebar.slider(
+    "Total Budget Cap ($)", 100000, 1000000, 600000, step=25000
+)
+enable_synergy = st.sidebar.checkbox(
+    "Enable Multi-Node Synergy Bundle ($50k Discount)", value=True
+)
 
-    if synergy_active:
-        y_bundle = pulp.LpVariable("y_bundle", cat='Binary')
-        prob += y_bundle <= x['Logistics_Hub']
-        prob += y_bundle <= x['Primary_Warehouse']
-        prob += y_bundle >= x['Logistics_Hub'] + x['Primary_Warehouse'] - 1
-        base_cost = pulp.lpSum(nodes[node]['cost'] * x[node] for node in nodes)
-        prob += base_cost - (50000 * y_bundle) <= cap
-    else:
-        y_bundle = None
-        prob += pulp.lpSum(nodes[node]['cost'] * x[node] for node in nodes) <= cap
+st.sidebar.markdown("---")
+st.sidebar.subheader("Custom Portfolio Nodes")
+st.sidebar.markdown(
+    "Add, rename, or configure your supply chain intervention targets below:"
+)
 
-    prob.solve(pulp.PULP_CBC_CMD(msg=False))
+# Initialize session state for custom nodes if not present
+if "nodes_df" not in st.session_state:
+  st.session_state.nodes_df = pd.DataFrame([
+      {
+          "Node Name": "Logistics_Hub",
+          "Action": "Alternative port routing & freight contracts",
+          "Cost": 200000,
+          "Risk Reduction (%)": 20.0,
+      },
+      {
+          "Node Name": "Primary_Warehouse",
+          "Action": "Primary warehouse resilience hardening",
+          "Cost": 250000,
+          "Risk Reduction (%)": 22.0,
+      },
+      {
+          "Node Name": "Backup_Supplier",
+          "Action": "Upgrade backup logistics & capacity",
+          "Cost": 150000,
+          "Risk Reduction (%)": 15.0,
+      },
+      {
+          "Node Name": "Tier_1_Suppliers",
+          "Action": "Onboard redundant regional secondary suppliers",
+          "Cost": 100000,
+          "Risk Reduction (%)": 12.0,
+      },
+  ])
 
-    selected = []
-    total_base_cost = 0
-    total_risk_drop = 0
-    for node, var in x.items():
-        if pulp.value(var) == 1:
-            selected.append({'node': node, **nodes[node]})
-            total_base_cost += nodes[node]['cost']
-            total_risk_drop += nodes[node]['risk_drop']
-    bundled = (y_bundle is not None and pulp.value(y_bundle) == 1)
-    final_spent = total_base_cost - (50000 if bundled else 0)
-    return selected, total_base_cost, final_spent, total_risk_drop, bundled, pulp.LpStatus[prob.status]
+# Allow user to edit existing nodes or add new ones directly in data editor
+edited_nodes = st.sidebar.data_editor(
+    st.session_state.nodes_df, num_rows="dynamic", use_container_width=True
+)
+st.session_state.nodes_df = edited_nodes
 
-portfolio, base_spent, final_spent, risk_drop, bundled, solver_status = solve_ilp(budget_cap, enable_synergy)
-baseline_risk = min(99.0, (macro_shock * 1.0) + (shipping_shock * 0.5))
-final_risk = max(5.0, baseline_risk - risk_drop)
+# --- OPTIMIZATION ENGINE (ILP SOLVER) ---
+nodes = edited_nodes["Node Name"].tolist()
+costs = dict(zip(nodes, edited_nodes["Cost"]))
+risks = dict(zip(nodes, edited_nodes["Risk Reduction (%)"]))
+actions = dict(zip(nodes, edited_nodes["Action"]))
 
+prob = pl.LpProblem("Supply_Chain_Optimization", pl.LpMaximize)
+x = {n: pl.LpVariable(f"x_{n}", cat="Binary") for n in nodes}
+bundle_active = pl.LpVariable("bundle_active", cat="Binary")
+
+# Objective: Maximize total risk reduction
+prob += pl.lpSum(risks[n] * x[n] for n in nodes)
+
+# Cost Constraint with Synergy Discount
+if enable_synergy and len(nodes) >= 3:
+  prob += (
+      pl.lpSum(costs[n] * x[n] for n in nodes)
+      - 50000 * bundle_active
+      <= total_budget
+  )
+  # Bundle logic: active only if at least 3 nodes are selected
+  prob += pl.lpSum(x[n] for n in nodes) >= 3 * bundle_active
+else:
+  prob += pl.lpSum(costs[n] * x[n] for n in nodes) <= total_budget
+
+prob.solve(pl.PULP_CBC_CMD(msg=False))
+
+# Calculate results
+selected_nodes = [n for n in nodes if pl.value(x[n]) == 1]
+total_cost = sum(costs[n] for n in selected_nodes)
+is_bundle_active = (
+    bool(pl.value(bundle_active) == 1)
+    if (enable_synergy and len(nodes) >= 3)
+    else False
+)
+if is_bundle_active:
+  total_cost -= 50000
+
+total_risk_drop = sum(risks[n] for n in selected_nodes)
+baseline_risk = 82.5
+optimized_risk = max(0.0, baseline_risk - total_risk_drop)
+
+# --- MAIN DASHBOARD DISPLAY ---
 col1, col2, col3 = st.columns(3)
-with col1:
-    st.metric(label="Baseline System Risk", value=f"{baseline_risk:.2f}%")
-with col2:
-    st.metric(label="Optimized System Risk", value=f"{final_risk:.2f}%", delta=f"-{risk_drop:.2f} pts")
-with col3:
-    st.metric(label="Capital Deployed", value=f"${final_spent:,.2f}", delta=f"Cap: ${budget_cap:,.2f}")
+col1.metric("Baseline System Risk", f"{baseline_risk:.2f}%")
+col2.metric(
+    "Optimized System Risk",
+    f"{optimized_risk:.2f}%",
+    delta=f"-{total_risk_drop:.2f} pts",
+    delta_value="inverse",
+)
+col3.metric(
+    "Capital Deployed",
+    f"${total_cost:,.2f}",
+    delta=f"Cap: ${total_budget:,.2f}",
+    delta_value="off",
+)
 
-st.markdown("---")
-tab_portfolio, tab_sensitivity = st.tabs(["Optimal Portfolio", "CFO Budget Sensitivity Sweep"])
+if is_bundle_active:
+  st.success("Multi-node bundle synergy active: $50,000 discount applied.")
 
-with tab_portfolio:
-    st.subheader("Globally Optimal Capital Allocation Portfolio")
-    if solver_status == "Optimal" and portfolio:
-        if bundled:
-            st.success("Multi-node bundle synergy active: **$50,000 discount** applied.")
-        table_data = [{"Priority": f"Rank #{i+1}", "Target Node": item['node'], "Strategic Action": item['desc'], "Capital Required": f"${item['cost']:,}", "Risk Reduction": f"{item['risk_drop']} pts"} for i, item in enumerate(portfolio)]
-        st.table(table_data)
+tab1, tab2 = st.tabs(
+    ["Optimal Portfolio", "CFO Budget Sensitivity & Visual Sweep"]
+)
+
+with tab1:
+  st.subheader("Globally Optimal Capital Allocation Portfolio")
+  if selected_nodes:
+    portfolio_data = []
+    for idx, n in enumerate(selected_nodes, 1):
+      portfolio_data.append({
+          "Priority": f"Rank #{idx}",
+          "Target Node": n,
+          "Strategic Action": actions.get(n, "Custom Intervention"),
+          "Capital Required": f"${costs[n]:,.2f}",
+          "Risk Reduction (%)": f"{risks[n]}%",
+      })
+    df_portfolio = pd.DataFrame(portfolio_data)
+    st.dataframe(df_portfolio, use_container_width=True)
+
+    # CSV Export Button
+    csv_data = df_portfolio.to_csv(index=False).encode("utf-8")
+    st.download_button(
+        label="📥 Download Optimal Portfolio CSV",
+        data=csv_data,
+        file_name="optimal_supply_chain_portfolio.csv",
+        mime="text/csv",
+    )
+  else:
+    st.warning(
+        "No nodes selected. Increase your budget cap or adjust node costs."
+    )
+
+with tab2:
+  st.subheader("Budget Sensitivity Analysis & Marginal ROI")
+  st.markdown(
+      "Evaluating how portfolio selections scale across variable budget"
+      " thresholds:"
+  )
+
+  sweep_results = []
+  budget_range = range(
+      max(50000, total_budget - 100000), total_budget + 150000, 25000
+  )
+
+  for b in budget_range:
+    sub_prob = pl.LpProblem(f"Sub_{b}", pl.LpMaximize)
+    sub_x = {n: pl.LpVariable(f"sx_{n}", cat="Binary") for n in nodes}
+    sub_bundle = pl.LpVariable(f"sb_{b}", cat="Binary")
+
+    sub_prob += pl.lpSum(risks[n] * sub_x[n] for n in nodes)
+    if enable_synergy and len(nodes) >= 3:
+      sub_prob += (
+          pl.lpSum(costs[n] * sub_x[n] for n in nodes)
+          - 50000 * sub_bundle
+          <= b
+      )
+      sub_prob += pl.lpSum(sub_x[n] for n in nodes) >= 3 * sub_bundle
     else:
-        st.warning("The selected budget cap is too restrictive to fund resilience enhancements.")
+      sub_prob += pl.lpSum(costs[n] * sub_x[n] for n in nodes) <= b
 
-with tab_sensitivity:
-    st.subheader("Budget Sensitivity Analysis (±$50k Variance)")
-    sweep_range = range(max(350000, budget_cap - 50000), budget_cap + 55000, 25000)
-    sweep_data = []
-    for b in sweep_range:
-        sel, _, spent, r_drop, b_active, _ = solve_ilp(b, enable_synergy)
-        nodes_str = ", ".join([item['node'] for item in sel]) if sel else "None"
-        sweep_data.append({"Budget Cap": f"${b:,}", "Actual Spent": f"${spent:,}", "Risk Drop": f"{r_drop:.1f} pts", "Bundle Active?": "Yes" if b_active else "No", "Selected Portfolio": nodes_str})
-    st.table(sweep_data)
+    sub_prob.solve(pl.PULP_CBC_CMD(msg=False))
+    s_nodes = [n for n in nodes if pl.value(sub_x[n]) == 1]
+    s_cost = sum(costs[n] for n in s_nodes)
+    s_bundle_on = (
+        bool(pl.value(sub_bundle) == 1)
+        if (enable_synergy and len(nodes) >= 3)
+        else False
+    )
+    if s_bundle_on:
+      s_cost -= 50000
+    s_risk = sum(risks[n] for n in s_nodes)
+
+    sweep_results.append({
+        "Budget Cap": f"${b:,.2f}",
+        "Actual Spent": f"${s_cost:,.2f}",
+        "Risk Drop (pts)": s_risk,
+        "Bundle Active?": "Yes" if s_bundle_on else "No",
+        "Selected Portfolio": ", ".join(s_nodes) if s_nodes else "None",
+        "RawBudget": b,
+        "RawRisk": s_risk,
+    })
+
+  df_sweep = pd.DataFrame(sweep_results)
+
+  # Visual Chart for Executive Presentation
+  st.line_chart(
+      df_sweep.set_index("RawBudget")[["RawRisk"]],
+      use_container_width=True,
+  )
+  st.caption("Figure: System Risk Reduction Curve across Budget Variations.")
+
+  st.dataframe(
+      df_sweep[[
+          "Budget Cap",
+          "Actual Spent",
+          "Risk Drop (pts)",
+          "Bundle Active?",
+          "Selected Portfolio",
+      ]],
+      use_container_width=True,
+  )

@@ -97,8 +97,8 @@ edited_bundles = st.sidebar.data_editor(
 )
 st.session_state.bundles_df = edited_bundles
 
-# --- DATA EXTRACTION ---
-nodes = edited_nodes["Node Name"].tolist()
+# --- DATA EXTRACTION & SAFE CLEANING ---
+nodes = edited_nodes["Node Name"].dropna().tolist()
 costs = dict(zip(nodes, edited_nodes["Cost"]))
 risks = dict(zip(nodes, edited_nodes["Risk Reduction (%)"]))
 lead_times = dict(zip(nodes, edited_nodes["Lead Time Saved (Days)"]))
@@ -109,34 +109,36 @@ actions = dict(zip(nodes, edited_nodes["Action"]))
 prob = pl.LpProblem("Commercial_Supply_Chain_Optimization", pl.LpMaximize)
 x = {n: pl.LpVariable(f"x_{n}", cat="Binary") for n in nodes}
 
-# Binary variables for each dynamic bundle
 bundle_vars = {}
-active_bundles_info = []
-
 for idx, row in edited_bundles.iterrows():
-  b_name = str(row["Bundle Name"]).strip()
-  b_discount = float(row["Discount ($)"])
-  req_nodes_raw = str(row["Required Nodes (Comma Separated)"])
+  b_name = row.get("Bundle Name")
+  if not b_name or pd.isna(b_name) or str(b_name).strip().lower() == "none":
+    continue
+
+  try:
+    b_discount = float(row.get("Discount ($)", 0))
+  except (ValueError, TypeError):
+    b_discount = 0.0
+
+  req_nodes_raw = str(row.get("Required Nodes (Comma Separated)", ""))
   req_nodes = [n.strip() for n in req_nodes_raw.split(",") if n.strip() in nodes]
 
-  if b_name and req_nodes:
+  if str(b_name).strip() and req_nodes:
     b_var = pl.LpVariable(f"bundle_{idx}", cat="Binary")
-    bundle_vars[b_name] = {
+    bundle_vars[str(b_name).strip()] = {
         "var": b_var,
         "discount": b_discount,
         "nodes": req_nodes,
     }
-    # A bundle is active only if all its required nodes are selected (AND logic)
     for rn in req_nodes:
       prob += b_var <= x[rn]
-    # To prevent over-triggering, set upper bound logic if needed, or let solver maximize
 
 # Objective: Maximize total risk reduction weighted with lead-time efficiency
 prob += pl.lpSum(
     risks[n] * x[n] + (0.5 * lead_times[n] * x[n]) for n in nodes
 )
 
-# Cost Constraint incorporating all active dynamic bundle discounts
+# Cost Constraint incorporating safe bundle discounts
 total_discounts = pl.lpSum(
     bundle_vars[b]["var"] * bundle_vars[b]["discount"] for b in bundle_vars
 )
@@ -163,7 +165,7 @@ total_carbon_saved = sum(carbon_impacts[n] for n in selected_nodes)
 baseline_risk = 82.5
 optimized_risk = max(0.0, baseline_risk - total_risk_drop)
 
-# --- DASHBOARD METrics DISPLAY ---
+# --- DASHBOARD METRICS DISPLAY ---
 col1, col2, col3, col4 = st.columns(4)
 col1.metric("Baseline System Risk", f"{baseline_risk:.2f}%")
 col2.metric(
@@ -175,7 +177,6 @@ col2.metric(
 col3.metric("Capital Deployed", f"${final_cost_spent:,.2f}")
 col4.metric("Lead Time Saved", f"{total_lead_time_saved} Days")
 
-# Secondary Metrics Row
 sec1, sec2 = st.columns(2)
 sec1.metric("ESG Carbon Offset", f"{total_carbon_saved} Metric Tons")
 sec2.metric("Active Synergy Bundles", f"{len(active_bundle_names)} Applied")
@@ -234,16 +235,24 @@ with tab2:
 
     sub_bundle_vars = {}
     for idx, row in edited_bundles.iterrows():
-      b_name = str(row["Bundle Name"]).strip()
-      b_discount = float(row["Discount ($)"])
+      b_name = row.get("Bundle Name")
+      if not b_name or pd.isna(b_name) or str(b_name).strip().lower() == "none":
+        continue
+      try:
+        b_discount = float(row.get("Discount ($)", 0))
+      except (ValueError, TypeError):
+        b_discount = 0.0
+
       req_nodes = [
           n.strip()
-          for n in str(row["Required Nodes (Comma Separated)"]).split(",")
+          for n in str(row.get("Required Nodes (Comma Separated)", "")).split(
+              ","
+          )
           if n.strip() in nodes
       ]
-      if b_name and req_nodes:
+      if str(b_name).strip() and req_nodes:
         sb_var = pl.LpVariable(f"sb_{idx}_{b}", cat="Binary")
-        sub_bundle_vars[b_name] = {
+        sub_bundle_vars[str(b_name).strip()] = {
             "var": sb_var,
             "discount": b_discount,
             "nodes": req_nodes,

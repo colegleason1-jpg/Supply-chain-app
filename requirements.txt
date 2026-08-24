@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+scipy
+pulp
+networkx
+supabase
+openpyxl
+reportlab
+yfinance

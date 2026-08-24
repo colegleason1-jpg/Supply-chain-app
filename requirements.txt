@@ -1,8 +1,0 @@
-pulp
-numpy
-pandas
-scipy
-networkx
-reportlab
-yfinance
-supabase
